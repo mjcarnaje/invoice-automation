@@ -20,9 +20,6 @@ TOKEN_FILE      = 'token.pickle'
 CREDENTIALS_FILE= 'credentials.json'      
 CHROME_BIN = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"
 
-###############################################################################
-# 1) Gmail helpers – unchanged
-###############################################################################
 def get_gmail_service():
     creds = None
     if os.path.exists(TOKEN_FILE):
@@ -70,24 +67,24 @@ def get_drive_service():
 
     return build('drive', 'v3', credentials=creds)
 
-gmail = get_gmail_service()
-sheets = get_sheets_service()
-drive = get_drive_service()
+gmail_service = get_gmail_service()
+sheets_service = get_sheets_service()
+drive_service = get_drive_service()
   
 def latest_summary_threads(max_threads=2):
-    lbls = gmail.users().labels().list(userId='me').execute()['labels']
+    lbls = gmail_service.users().labels().list(userId='me').execute()['labels']
     label_id = next((l['id'] for l in lbls if l['name'] == LABEL), None)
     if not label_id:
         print(f"[!] Gmail label \"{LABEL}\" not found"); return []
 
-    threads = gmail.users().threads().list(
+    threads = gmail_service.users().threads().list(
                 userId='me', labelIds=[label_id], maxResults=max_threads
               ).execute().get('threads', [])
     return [t['id'] for t in threads]
 
 def get_thread_html(thread_id):
     """Return the first HTML part of the first message in the thread."""
-    thread = gmail.users().threads().get(
+    thread = gmail_service.users().threads().get(
                userId='me', id=thread_id, format='full'
              ).execute()
     msg = thread['messages'][0]['payload']
@@ -103,7 +100,7 @@ def get_thread_html(thread_id):
 
 def get_thread_subject(thread_id):
     """Get the subject of the first message in the thread."""
-    thread = gmail.users().threads().get(
+    thread = gmail_service.users().threads().get(
                userId='me', id=thread_id, format='metadata'
              ).execute()
     
@@ -121,9 +118,6 @@ def get_thread_subject(thread_id):
     
     return f"timesheet_{thread_id}"  # Fallback if no subject found
 
-###############################################################################
-# 2) Screenshot functions
-###############################################################################
 def extract_header_and_body(full_html: str) -> str:
     """
     Return a stand-alone HTML string containing everything from
@@ -226,7 +220,7 @@ def html_to_png(html, folder_name, filename):
     
 def duplicate_invoice_tab(spreadsheet_id):
     # 1) read all sheets
-    meta = sheets.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+    meta = sheets_service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
     sheet_list = meta.get('sheets', [])
 
     # 2) pick the highest invoice no from tab titles
@@ -261,7 +255,7 @@ def duplicate_invoice_tab(spreadsheet_id):
         }
       }]
     }
-    response = sheets.spreadsheets().batchUpdate(
+    response = sheets_service.spreadsheets().batchUpdate(
         spreadsheetId=spreadsheet_id, body=body).execute()
 
     # Check if the duplication was successful
@@ -275,7 +269,7 @@ def duplicate_invoice_tab(spreadsheet_id):
 def set_sheet_data(spreadsheet_id, sheet_name, data):
     # Get the sheet ID
     sheet_id = None
-    for sheet in sheets.spreadsheets().get(spreadsheetId=spreadsheet_id).execute().get('sheets', []):
+    for sheet in sheets_service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute().get('sheets', []):
         if sheet['properties']['title'] == sheet_name:
             sheet_id = sheet['properties']['sheetId']
             break
@@ -293,9 +287,7 @@ def set_sheet_data(spreadsheet_id, sheet_name, data):
     #   'week_two_hours': int
     # }
     
-    # Build the update requests
-    requests = []
-    
+  
     # Update values using batchUpdate with valueInputOption=USER_ENTERED
     value_ranges = []
     
@@ -347,7 +339,7 @@ def set_sheet_data(spreadsheet_id, sheet_name, data):
             'valueInputOption': 'USER_ENTERED',
             'data': value_ranges
         }
-        sheets.spreadsheets().values().batchUpdate(
+        sheets_service.spreadsheets().values().batchUpdate(
             spreadsheetId=spreadsheet_id,
             body=body
         ).execute()
@@ -375,7 +367,7 @@ def get_total_hours(image_path):
 
 def save_pdf_to_sheet(spreadsheet_id, sheet_name=None, filename=None):
     # Get all sheets
-    sheets_metadata = sheets.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+    sheets_metadata = sheets_service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
     sheet_list = sheets_metadata.get('sheets', [])
     
     # If no sheet name provided, use the last sheet
@@ -401,9 +393,8 @@ def save_pdf_to_sheet(spreadsheet_id, sheet_name=None, filename=None):
     
     # Export the PDF using the correct approach for a single sheet
     # Using the sheets.spreadsheets.export endpoint with gid parameter
-    # Construct the export URL manually to ensure only the specific sheet is exported
-    drive_service = drive
-    
+    # Construct the export URL manually to ensure only the specific sheet is exported    
+
     # Build the export URL
     export_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/export"
     params = {
@@ -440,9 +431,6 @@ def save_pdf_to_sheet(spreadsheet_id, sheet_name=None, filename=None):
     print(f"PDF saved successfully: {filename}")
     return filename
 
-###############################################################################
-# 3) Main flow
-###############################################################################
 def main():
     # --skip-screenshot
     args = sys.argv[1:]
