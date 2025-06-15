@@ -11,6 +11,10 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
 
 SCOPES = ['https://www.googleapis.com/auth/gmail.modify',
           'https://www.googleapis.com/auth/drive',
@@ -431,6 +435,92 @@ def save_pdf_to_sheet(spreadsheet_id, sheet_name=None, filename=None):
     print(f"PDF saved successfully: {filename}")
     return filename
 
+def create_email_draft(invoice_no, date_range, pdf_path, timesheet_images):
+    """Create an email draft with invoice PDF and timesheet screenshots as attachments."""
+    
+    # Email details
+    from_email = "carnaje.michaeljames@gmail.com"
+    to_email = "elsie@gcaresolution.com"
+    cc_email = "dianne@gcaresolution.com"
+    subject = f"Salary Invoice #{invoice_no}, {date_range}"
+    
+    # Email body
+    body = """Good day po!
+
+Please find the attached files for your reference.
+
+Thank you!
+
+Best regards,
+Mj Carnaje"""
+    
+    # Create message
+    message = MIMEMultipart()
+    message['From'] = f"Michael James <{from_email}>"
+    message['To'] = to_email
+    message['Cc'] = cc_email
+    message['Subject'] = subject
+    
+    # Add body to email
+    message.attach(MIMEText(body, 'plain'))
+    
+    # Attach PDF
+    if os.path.exists(pdf_path):
+        with open(pdf_path, "rb") as attachment:
+            part = MIMEBase('application', 'octet-stream')
+            part.set_payload(attachment.read())
+        
+        encoders.encode_base64(part)
+        part.add_header(
+            'Content-Disposition',
+            f'attachment; filename= {os.path.basename(pdf_path)}'
+        )
+        message.attach(part)
+        print(f"Attached PDF: {os.path.basename(pdf_path)}")
+    
+    # Attach timesheet images (limit to 2 most recent)
+    image_list = list(timesheet_images.values())[-2:]  # Get last 2 images
+    for image_path in image_list:
+        if os.path.exists(image_path):
+            with open(image_path, "rb") as attachment:
+                part = MIMEBase('application', 'octet-stream')
+                part.set_payload(attachment.read())
+            
+            encoders.encode_base64(part)
+            part.add_header(
+                'Content-Disposition',
+                f'attachment; filename= {os.path.basename(image_path)}'
+            )
+            message.attach(part)
+            print(f"Attached timesheet: {os.path.basename(image_path)}")
+    
+    # Convert to base64 encoded string
+    raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
+    
+    # Create draft
+    draft_body = {
+        'message': {
+            'raw': raw_message
+        }
+    }
+    
+    try:
+        draft = gmail_service.users().drafts().create(
+            userId='me',
+            body=draft_body
+        ).execute()
+        
+        draft_id = draft['id']
+        print(f"Email draft created successfully! Draft ID: {draft_id}")
+        print(f"Subject: {subject}")
+        print(f"To: {to_email}")
+        print(f"CC: {cc_email}")
+        return draft_id
+        
+    except Exception as e:
+        print(f"Error creating email draft: {str(e)}")
+        return None
+
 def main():
     # --skip-screenshot
     args = sys.argv[1:]
@@ -500,6 +590,33 @@ def main():
     
     # Sort week dates
     week_dates.sort(key=lambda date_range: parse_date(date_range.split(" - ")[0]))
+    
+    # Calculate overall date range for email subject
+    overall_date_range = ""
+    if len(week_dates) >= 2:
+        # Get start date from first week and end date from last week
+        first_week = week_dates[0]
+        last_week = week_dates[-1]
+        
+        # Extract start date from first week (e.g., "May 30" from "May 30 - Jun 5")
+        first_start = first_week.split(" - ")[0]
+        
+        # Extract end date from last week properly
+        last_week_parts = last_week.split(" - ")
+        last_start = last_week_parts[0]
+        last_end = last_week_parts[1]
+        
+        # If end date doesn't contain month, use month from start of that week
+        if " " not in last_end:  # Just a day number (e.g., "12")
+            last_start_parts = last_start.split(" ")
+            if len(last_start_parts) >= 1:
+                last_month = last_start_parts[0]  # Get month from start of last week
+                last_end = f"{last_month} {last_end}"
+        
+        overall_date_range = f"{first_start} - {last_end}"
+        print(f"Overall date range for email: {overall_date_range}")
+    elif len(week_dates) == 1:
+        overall_date_range = week_dates[0]
     
     # Calculate submission date (2 days after the last day of latest timesheet)
     from datetime import datetime, timedelta
@@ -592,6 +709,156 @@ def main():
     pdf_path = os.path.join(folder_name, pdf_filename)
     save_pdf_to_sheet(spreadsheet_id, new_invoice_title, pdf_path)
     print(f"PDF saved to: {pdf_path}")
+    
+    # Create email draft with attachments
+    if overall_date_range and not skip_screenshot:
+        print("\nCreating email draft...")
+        draft_id = create_email_draft(
+            invoice_no=invoice_no,
+            date_range=overall_date_range,
+            pdf_path=pdf_path,
+            timesheet_images=timesheet_images
+        )
+        if draft_id:
+            print(f"Email draft created successfully with ID: {draft_id}")
+        else:
+            print("Failed to create email draft")
+    else:
+        print("Skipping email draft creation (missing date range or screenshots skipped)")
 
+def create_draft_for_latest_invoice():
+    invoices_folder = "invoices"
+    
+    # Check if invoices folder exists
+    if not os.path.exists(invoices_folder):
+        print(f"Invoices folder '{invoices_folder}' not found!")
+        return
+    
+    # Get all invoice folders
+    invoices = [f for f in os.listdir(invoices_folder) if os.path.isdir(os.path.join(invoices_folder, f))]
+    
+    if not invoices:
+        print("No invoice folders found!")
+        return
+    
+    # Find the latest invoice folder by creation time
+    latest_invoice = max(invoices, key=lambda x: os.path.getctime(os.path.join(invoices_folder, x)))
+    latest_invoice_path = os.path.join(invoices_folder, latest_invoice)
+    print(f"Latest invoice: {latest_invoice}")
+    print(f"Latest invoice path: {latest_invoice_path}")
+    
+    # Extract invoice number from folder name (e.g., "Invoice #33" -> "33")
+    invoice_no = ""
+    if "#" in latest_invoice:
+        invoice_no = latest_invoice.split('#')[1].strip()
+    else:
+        print("Could not extract invoice number from folder name")
+        return
+    
+    # Find PDF file in the folder
+    pdf_files = [f for f in os.listdir(latest_invoice_path) if f.endswith('.pdf')]
+    if not pdf_files:
+        print("No PDF file found in the invoice folder!")
+        return
+    
+    pdf_path = os.path.join(latest_invoice_path, pdf_files[0])
+    print(f"Found PDF: {pdf_files[0]}")
+    
+    # Find timesheet images (PNG files)
+    png_files = [f for f in os.listdir(latest_invoice_path) if f.endswith('.png')]
+    timesheet_images = {}
+    
+    for png_file in png_files:
+        # Remove .png extension to get date range
+        date_range = png_file[:-4]  # Remove .png
+        full_path = os.path.join(latest_invoice_path, png_file)
+        timesheet_images[date_range] = full_path
+        print(f"Found timesheet: {png_file}")
+    
+    # Calculate overall date range for email subject
+    if not timesheet_images:
+        print("No timesheet images found!")
+        return
+    
+    # Helper functions for date parsing (same as in main())
+    def month_to_num(month_abbr):
+        months = {
+            'Jan': 1, 'Feb': 2, 'Mar': 3, 'Apr': 4, 'May': 5, 'Jun': 6,
+            'Jul': 7, 'Aug': 8, 'Sep': 9, 'Oct': 10, 'Nov': 11, 'Dec': 12
+        }
+        return months.get(month_abbr, 0)
+    
+    def parse_date(date_str):
+        parts = date_str.split()
+        if len(parts) >= 2:
+            month, day = parts[0], parts[1]
+            try:
+                return (month_to_num(month), int(day))
+            except (ValueError, KeyError):
+                return (0, 0)
+        return (0, 0)
+    
+    # Sort date ranges chronologically
+    week_dates = list(timesheet_images.keys())
+    week_dates.sort(key=lambda date_range: parse_date(date_range.split(" - ")[0]))
+    
+    # Calculate overall date range
+    overall_date_range = ""
+    if len(week_dates) >= 2:
+        # Get start date from first week and end date from last week
+        first_week = week_dates[0]
+        last_week = week_dates[-1]
+        
+        # Extract start date from first week (e.g., "May 30" from "May 30 - Jun 5")
+        first_start = first_week.split(" - ")[0]
+        
+        # Extract end date from last week properly
+        last_week_parts = last_week.split(" - ")
+        last_start = last_week_parts[0]
+        last_end = last_week_parts[1]
+        
+        # If end date doesn't contain month, use month from start of that week
+        if " " not in last_end:  # Just a day number (e.g., "12")
+            last_start_parts = last_start.split(" ")
+            if len(last_start_parts) >= 1:
+                last_month = last_start_parts[0]  # Get month from start of last week
+                last_end = f"{last_month} {last_end}"
+        
+        overall_date_range = f"{first_start} - {last_end}"
+        print(f"Overall date range for email: {overall_date_range}")
+    elif len(week_dates) == 1:
+        overall_date_range = week_dates[0]
+    else:
+        print("Could not determine date range for email subject")
+        return
+    
+    # Create email draft
+    print(f"\nCreating email draft for Invoice #{invoice_no}...")
+    draft_id = create_email_draft(
+        invoice_no=invoice_no,
+        date_range=overall_date_range,
+        pdf_path=pdf_path,
+        timesheet_images=timesheet_images
+    )
+    
+    if draft_id:
+        print(f"Email draft created successfully with ID: {draft_id}")
+        print(f"Subject: Salary Invoice #{invoice_no}, {overall_date_range}")
+        print(f"Attachments: {len(timesheet_images) + 1} files (1 PDF + {len(timesheet_images)} timesheets)")
+    else:
+        print("Failed to create email draft")
 if __name__ == '__main__':
-    main()
+    args = sys.argv[1:]
+    
+    commands = {
+        'create_draft_for_latest_invoice': create_draft_for_latest_invoice,
+        'main': main
+    }
+    
+    command = args[0] if args else 'main'
+    
+    if command in commands:
+        commands[command]()
+    else:
+        print(f"Unknown command: {command}")
+        print("Available commands:", list(commands.keys()))
